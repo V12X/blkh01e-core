@@ -1,0 +1,12 @@
+# Configuração do gitleaks — BlackHoleCore (repo público).
+# Os únicos achados da regra genérica são SENHAS FIXAS DE TESTE unitário — não são credenciais.
+# Segredos de verdade nunca vivem neste repo (é só o núcleo de cripto, sem chaves nem tokens).
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Falsos positivos: senhas literais dos testes unitários"
+paths = [
+  '''Tests/.*\.swift''',
+]

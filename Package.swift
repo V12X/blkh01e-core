@@ -13,7 +13,9 @@ let package = Package(
         .library(name: "BlackHoleCore", targets: ["BlackHoleCore"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/jedisct1/swift-sodium.git", from: "0.9.1"),
+        // Pin EXATO (cadeia de suprimento): num núcleo de cripto, dependência não muda sem commit.
+        // Bump deliberado a cada upgrade, com re-teste da suíte (KAT do Argon2id pega divergência).
+        .package(url: "https://github.com/jedisct1/swift-sodium.git", exact: "0.11.0"),
         // secp256k1/schnorr (libsecp256k1 da Bitcoin Core) — NÃO existe no CryptoKit e é EXIGIDO
         // pelo Nostr para assinar eventos do transporte da sessão ao vivo. Uso restrito ao módulo
         // Nostr; a cripto das MENSAGENS continua sendo só CryptoKit + libsodium. Versão pinada

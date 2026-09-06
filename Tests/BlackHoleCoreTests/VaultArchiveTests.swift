@@ -80,6 +80,73 @@ final class VaultArchiveTests: XCTestCase {
         XCTAssertEqual(try storeB.read(storeB.items().first { $0.id == "i2" }!), Data(repeating: 0x7F, count: 5000))
     }
 
+    /// Streaming na volta: restaurar DO ARQUIVO dá o mesmo resultado que restaurar do `Data`
+    /// inteiro — mesmos itens, mesmo conteúdo — sem nunca ter o arquivo todo em memória.
+    func testRestoreFromFile_matchesDataRestore() throws {
+        let (_, session, store, blobs) = try seededVaultA()
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("bh-\(UUID().uuidString).blkh01e")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try VaultArchive.export(session: session, items: store.items(), blobs: blobs,
+                                passphrase: "f", params: .testFast(), to: url)
+
+        let blobsFile = InMemoryBlobStore()
+        let (_, sessionFile) = try VaultArchive.restore(from: url, passphrase: "f", into: blobsFile,
+                                                       device: deviceB(), newPassword: "n", kdf: .testFast())
+        let storeFile = try VaultStore(session: sessionFile, blobs: blobsFile)
+
+        let blobsMem = InMemoryBlobStore()
+        let (_, sessionMem) = try VaultArchive.restore(try Data(contentsOf: url), passphrase: "f",
+                                                       into: blobsMem, device: deviceB(),
+                                                       newPassword: "n", kdf: .testFast())
+        let storeMem = try VaultStore(session: sessionMem, blobs: blobsMem)
+
+        XCTAssertEqual(storeFile.items().map(\.id).sorted(), storeMem.items().map(\.id).sorted())
+        XCTAssertEqual(try storeFile.read(storeFile.items().first { $0.id == "i1" }!), Data("dossiê".utf8))
+        XCTAssertEqual(try storeFile.read(storeFile.items().first { $0.id == "i2" }!),
+                       Data(repeating: 0x7F, count: 5000))
+    }
+
+    /// Frase errada no caminho de arquivo dá o MESMO erro único do caminho em memória (nada de
+    /// distinguir "frase errada" de "arquivo adulterado").
+    func testRestoreFromFile_wrongPassphrase() throws {
+        let (_, session, store, blobs) = try seededVaultA()
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("bh-\(UUID().uuidString).blkh01e")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try VaultArchive.export(session: session, items: store.items(), blobs: blobs,
+                                passphrase: "f", params: .testFast(), to: url)
+        XCTAssertThrowsError(try VaultArchive.restore(from: url, passphrase: "errada",
+                                                      into: InMemoryBlobStore(), device: deviceB(),
+                                                      newPassword: "n", kdf: .testFast())) {
+            XCTAssertEqual($0 as? ArchiveError, .wrongPassphraseOrCorrupt)
+        }
+    }
+
+    /// Arquivo cortado no meio de um corpo: recusa como malformado em vez de gravar blob truncado.
+    func testRestoreFromFile_truncated_isMalformed() throws {
+        let (_, session, store, blobs) = try seededVaultA()
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("bh-\(UUID().uuidString).blkh01e")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try VaultArchive.export(session: session, items: store.items(), blobs: blobs,
+                                passphrase: "f", params: .testFast(), to: url)
+        let full = try Data(contentsOf: url)
+        try full.prefix(full.count - 1000).write(to: url)     // corta o fim
+        XCTAssertThrowsError(try VaultArchive.restore(from: url, passphrase: "f",
+                                                      into: InMemoryBlobStore(), device: deviceB(),
+                                                      newPassword: "n", kdf: .testFast())) {
+            XCTAssertEqual($0 as? ArchiveError, .malformed)
+        }
+    }
+
+    /// Arquivo inexistente não estoura: erro de formato, como qualquer entrada inválida.
+    func testRestoreFromFile_missingFile_isMalformed() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("nao-existe-\(UUID().uuidString)")
+        XCTAssertThrowsError(try VaultArchive.restore(from: url, passphrase: "f",
+                                                      into: InMemoryBlobStore(), device: deviceB(),
+                                                      newPassword: "n", kdf: .testFast())) {
+            XCTAssertEqual($0 as? ArchiveError, .malformed)
+        }
+    }
+
     /// Falha no meio (frase vazia) não deixa arquivo pela metade.
     func testExportToFile_failure_leavesNoFile() throws {
         let (_, session, store, blobs) = try seededVaultA()

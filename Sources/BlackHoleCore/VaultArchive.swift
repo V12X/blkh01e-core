@@ -37,8 +37,9 @@ public enum VaultArchive {
     private static let version1: UInt8 = 1
     private static let headerLen = 4 + 1 + 1 + 4 + 4 + 16   // 30
 
-    /// Teto de RAM do v1: o arquivo é montado inteiro em memória. Streaming é evolução — até lá,
-    /// falhar com mensagem clara é melhor do que ser morto pelo jetsam no meio do export.
+    /// Teto do formato: soma dos corpos. Vale nos DOIS sentidos — o export recusa passar disso, e
+    /// a restauração recusa um arquivo que diga passar (arquivo assim não saiu daqui). Exportar e
+    /// importar são streaming, então o pico de RAM é ~um blob, não o cofre inteiro.
     public static let maxArchiveBytes = 200_000_000
 
     /// Rótulos lógicos (não as chaves derivadas): o diretório vai CIFRADO sob a MK, então os nomes
@@ -163,13 +164,44 @@ public enum VaultArchive {
                     newPassword: newPassword, kdf: .standard())
     }
 
+    /// Restaura DIRETO de um arquivo, em streaming: lê o cabeçalho, a MK embrulhada e o diretório
+    /// (todos pequenos) e depois **um corpo por vez**, gravando cada blob antes de ler o próximo.
+    /// O pico de memória é ~o maior blob, não o arquivo inteiro — o espelho do `export(to:)`.
+    /// Restaurar um cofre de 120 MB carregando tudo em `Data` era a mesma armadilha de jetsam que
+    /// o export tinha. Resultado IDÊNTICO à variante `Data` (mesmo caminho, só a fonte muda).
+    public static func restore(from url: URL, passphrase: String, into blobs: BlobStore,
+                               device: DeviceKeystore, newPassword: String) throws -> (VaultEnvelope, VaultSession) {
+        try restore(from: url, passphrase: passphrase, into: blobs, device: device,
+                    newPassword: newPassword, kdf: .standard())
+    }
+
     static func restore(_ archive: Data, passphrase: String, into blobs: BlobStore,
                         device: DeviceKeystore, newPassword: String, kdf: KDFParams) throws -> (VaultEnvelope, VaultSession) {
+        var reader = DataReader(data: archive)
+        return try restore(&reader, passphrase: passphrase, into: blobs, device: device,
+                           newPassword: newPassword, kdf: kdf)
+    }
+
+    static func restore(from url: URL, passphrase: String, into blobs: BlobStore,
+                        device: DeviceKeystore, newPassword: String, kdf: KDFParams) throws -> (VaultEnvelope, VaultSession) {
+        let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)??.intValue
+        guard let size else { throw ArchiveError.malformed }
+        let fd = openRead(url.path)
+        guard fd >= 0 else { throw ArchiveError.malformed }
+        defer { closeFD(fd) }
+        var reader = FileReader(fd: fd, size: size)
+        return try restore(&reader, passphrase: passphrase, into: blobs, device: device,
+                           newPassword: newPassword, kdf: kdf)
+    }
+
+    /// O caminho único de leitura. `reader` entrega bytes em ordem e sabe quantos ainda restam —
+    /// é o que permite rejeitar um comprimento hostil SEM alocar por ele.
+    private static func restore<R: ArchiveReader>(_ reader: inout R, passphrase: String, into blobs: BlobStore,
+                                                  device: DeviceKeystore, newPassword: String,
+                                                  kdf: KDFParams) throws -> (VaultEnvelope, VaultSession) {
         guard !passphrase.isEmpty else { throw ArchiveError.emptyPassphrase }
         guard !newPassword.isEmpty else { throw ArchiveError.emptyPassphrase }
-        guard archive.count >= headerLen + 8 else { throw ArchiveError.malformed }
-
-        let header = archive.subdata(in: 0..<headerLen)
+        guard let header = try reader.read(headerLen) else { throw ArchiveError.malformed }
         guard header.subdata(in: 0..<4) == magic else { throw ArchiveError.malformed }
         guard header[4] == version1 else { throw ArchiveError.unsupportedVersion }
 
@@ -184,9 +216,8 @@ public enum VaultArchive {
               params.opsLimit <= std.opsLimit,
               params.memLimit <= std.memLimit else { throw ArchiveError.malformed }
 
-        var off = headerLen
-        guard let wrappedMK = try readChunk(archive, &off) else { throw ArchiveError.malformed }
-        guard let sealedDir = try readChunk(archive, &off) else { throw ArchiveError.malformed }
+        guard let wrappedMK = try readChunk(&reader) else { throw ArchiveError.malformed }
+        guard let sealedDir = try readChunk(&reader) else { throw ArchiveError.malformed }
 
         guard let ek = try? KeyDerivation.deriveKey(password: passphrase, salt: salt, params: params),
               var mkData = AEAD.open(wrappedMK, key: ek, aad: header) else {
@@ -203,10 +234,14 @@ public enum VaultArchive {
 
         // Sessão temporária só para re-derivar as chaves de blob (mesma MK → mesmas chaves).
         let session = VaultSession(masterKey: mk)
+        var total = 0
         for e in entries {
-            guard e.size >= 0, off + e.size <= archive.count else { throw ArchiveError.malformed }
-            let data = archive.subdata(in: off..<(off + e.size))
-            off += e.size
+            // O tamanho do corpo é conferido contra o que RESTA no arquivo antes de qualquer
+            // alocação, e a soma contra o teto do formato (o export nunca passa dele).
+            guard e.size >= 0, e.size <= reader.remaining else { throw ArchiveError.malformed }
+            total += e.size
+            guard total <= maxArchiveBytes else { throw ArchiveError.tooLarge }
+            guard let data = try reader.read(e.size) else { throw ArchiveError.malformed }
             try blobs.put(try session.storageKey(e.label), data)
         }
 
@@ -218,15 +253,65 @@ public enum VaultArchive {
 
     // MARK: - Helpers
 
-    /// Lê `[u32 len][bytes]` com verificação de limites (nada de leitura fora do buffer).
-    private static func readChunk(_ d: Data, _ off: inout Int) throws -> Data? {
-        guard off + 4 <= d.count else { return nil }
-        let len = Int(readU32(d.subdata(in: off..<(off + 4))))
-        off += 4
-        guard len >= 0, off + len <= d.count else { return nil }
-        let out = d.subdata(in: off..<(off + len))
-        off += len
-        return out
+    /// Lê `[u32 len][bytes]` com verificação de limites (nada de leitura fora do arquivo).
+    private static func readChunk<R: ArchiveReader>(_ r: inout R) throws -> Data? {
+        guard let lenD = try r.read(4) else { return nil }
+        let len = Int(readU32(lenD))
+        guard len >= 0, len <= r.remaining else { return nil }
+        return try r.read(len)
+    }
+
+    /// Fonte SEQUENCIAL de bytes do arquivo. As duas restaurações (memória e streaming) usam o
+    /// mesmo caminho de leitura; só a fonte muda. `remaining` existe para recusar um comprimento
+    /// declarado maior que o arquivo ANTES de alocar por ele.
+    private protocol ArchiveReader {
+        /// Lê EXATAMENTE `n` bytes; `nil` se não houver tantos (arquivo truncado).
+        mutating func read(_ n: Int) throws -> Data?
+        var remaining: Int { get }
+    }
+
+    private struct DataReader: ArchiveReader {
+        let data: Data
+        var off = 0
+        var remaining: Int { data.count - off }
+        mutating func read(_ n: Int) throws -> Data? {
+            guard n >= 0, n <= remaining else { return nil }
+            let out = data.subdata(in: off..<(off + n))
+            off += n
+            return out
+        }
+    }
+
+    /// Leitura com `read(2)` CRU, não `FileHandle`. Medido: ler 180 MB em pedaços de 10 MB com
+    /// `FileHandle.read(upToCount:)` e descartar cada pedaço deixa o footprint em 182 MB — ele
+    /// retém o que já entregou, e o "streaming" viraria carregar o arquivo inteiro do mesmo jeito.
+    /// Com `read(2)` num buffer próprio o footprint fica plano (~um pedaço).
+    private struct FileReader: ArchiveReader {
+        let fd: Int32
+        let size: Int
+        var off = 0
+        var remaining: Int { size - off }
+        mutating func read(_ n: Int) throws -> Data? {
+            guard n >= 0, n <= remaining else { return nil }
+            guard n > 0 else { return Data() }
+            var out = Data(count: n)
+            let got: Int = out.withUnsafeMutableBytes { raw -> Int in
+                guard let base = raw.baseAddress else { return 0 }
+                var total = 0
+                while total < n {
+                    // `read` devolve menos que o pedido sem ser erro (leitura curta); e EINTR é
+                    // interrupção, não falha — os dois exigem repetir.
+                    let r = readBytes(fd, base.advanced(by: total), n - total)
+                    if r < 0 { if errno == EINTR { continue }; return total }
+                    if r == 0 { return total }          // EOF: arquivo mais curto que o diretório
+                    total += r
+                }
+                return total
+            }
+            guard got == n else { return nil }
+            off += n
+            return out
+        }
     }
 
     private static func appendU32(_ d: inout Data, _ v: UInt32) {

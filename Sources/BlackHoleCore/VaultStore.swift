@@ -64,6 +64,10 @@ public struct VaultFolder: Codable, Equatable {
 public protocol BlobStore {
     func put(_ id: String, _ data: Data) throws
     func get(_ id: String) throws -> Data?
+    /// Tamanho em bytes SEM carregar o conteúdo (nil = não existe). O export em streaming precisa
+    /// do tamanho de cada blob antes de escrever os corpos; sem isto, leria o cofre inteiro duas
+    /// vezes ou o manteria em RAM. Default no protocolo lê e conta; lojas em disco fazem `stat`.
+    func size(_ id: String) throws -> Int?
     func delete(_ id: String) throws
     /// Crypto-shred TOTAL: apaga TODOS os blobs (panic-wipe). Destrói real E falso — o armazenamento
     /// é compartilhado. Some com a MK embrulhada (no envelope) → todo conteúdo vira ruído.
@@ -71,6 +75,7 @@ public protocol BlobStore {
 }
 
 public extension BlobStore {
+    func size(_ id: String) throws -> Int? { try get(id)?.count }
     /// Existência SEM ler o conteúdo. O default (ler e descartar) é correto para qualquer store;
     /// o `FileBlobStore` do app sobrescreve com `fileExists` — o indexer da Busca Privada consulta
     /// isso por item a cada varredura, e não pode custar uma leitura inteira por consulta.

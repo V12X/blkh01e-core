@@ -58,6 +58,37 @@ final class VaultArchiveTests: XCTestCase {
         }
     }
 
+    /// Streaming para arquivo: mesmo formato (mesmo tamanho total), pico de memória ~um blob.
+    /// Restaura do arquivo noutro aparelho e o conteúdo sobrevive.
+    func testExportToFile_streams_sameFormat_restores() throws {
+        let (_, session, store, blobs) = try seededVaultA()
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("bh-\(UUID().uuidString).blkh01e")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try VaultArchive.export(session: session, items: store.items(), blobs: blobs,
+                                passphrase: "f", params: .testFast(), to: url)
+        let fromFile = try Data(contentsOf: url)
+        let fromData = try VaultArchive.export(session: session, items: store.items(), blobs: blobs,
+                                               passphrase: "f", params: .testFast())
+        XCTAssertEqual(fromFile.count, fromData.count, "mesmo layout → mesmo tamanho")
+        XCTAssertEqual(fromFile.prefix(4), Data("BHA1".utf8))
+
+        let blobsB = InMemoryBlobStore()
+        let (_, sessionB) = try VaultArchive.restore(fromFile, passphrase: "f", into: blobsB,
+                                                     device: deviceB(), newPassword: "n", kdf: .testFast())
+        let storeB = try VaultStore(session: sessionB, blobs: blobsB)
+        XCTAssertEqual(try storeB.read(storeB.items().first { $0.id == "i1" }!), Data("dossiê".utf8))
+        XCTAssertEqual(try storeB.read(storeB.items().first { $0.id == "i2" }!), Data(repeating: 0x7F, count: 5000))
+    }
+
+    /// Falha no meio (frase vazia) não deixa arquivo pela metade.
+    func testExportToFile_failure_leavesNoFile() throws {
+        let (_, session, store, blobs) = try seededVaultA()
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("bh-\(UUID().uuidString).blkh01e")
+        XCTAssertThrowsError(try VaultArchive.export(session: session, items: store.items(), blobs: blobs,
+                                                     passphrase: "", params: .testFast(), to: url))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+    }
+
     func testExport_emptyVault_roundTrips() throws {
         let vault = Vault(device: deviceA())
         let (_, session) = try vault.create(password: "p", kdf: .testFast())

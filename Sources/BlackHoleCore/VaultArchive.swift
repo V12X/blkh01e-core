@@ -55,9 +55,49 @@ public enum VaultArchive {
         try export(session: session, items: items, blobs: blobs, passphrase: passphrase, params: .standard())
     }
 
+    /// Exporta DIRETO para um arquivo, em streaming: o pico de memória é ~um blob (o maior), não o
+    /// cofre inteiro ×2. É o que o backup automático e a exportação manual devem usar — montar o
+    /// arquivo em `Data` num cofre de 120 MB chegava a ~290 MB de RAM e virava alvo de jetsam.
+    /// Bytes IDÊNTICOS à variante `Data` (mesmo caminho, só o destino muda).
+    public static func export(session: VaultSession, items: [VaultItem], blobs: BlobStore,
+                              passphrase: String, to url: URL) throws {
+        try export(session: session, items: items, blobs: blobs, passphrase: passphrase,
+                   params: .standard(), to: url)
+    }
+
     /// Interno: KDF arbitrário (testes usam rápido). A API pública fixa `.standard()`.
     static func export(session: VaultSession, items: [VaultItem], blobs: BlobStore,
                        passphrase: String, params: KDFParams) throws -> Data {
+        var out = Data()
+        try export(session: session, items: items, blobs: blobs, passphrase: passphrase, params: params) {
+            out.append($0)
+        }
+        return out
+    }
+
+    static func export(session: VaultSession, items: [VaultItem], blobs: BlobStore,
+                       passphrase: String, params: KDFParams, to url: URL) throws {
+        let fm = FileManager.default
+        try? fm.removeItem(at: url)
+        guard fm.createFile(atPath: url.path, contents: nil) else { throw ArchiveError.malformed }
+        let handle = try FileHandle(forWritingTo: url)
+        do {
+            try export(session: session, items: items, blobs: blobs, passphrase: passphrase, params: params) {
+                try handle.write(contentsOf: $0)
+            }
+            try handle.close()
+        } catch {
+            try? handle.close()
+            try? fm.removeItem(at: url)     // nunca deixa um arquivo pela metade
+            throw error
+        }
+    }
+
+    /// O caminho único: escreve o arquivo em ordem (header, MK embrulhada, diretório selado,
+    /// corpos) através de `sink`. Dois passes sobre os blobs: tamanhos (stat) para o diretório, que
+    /// precede os corpos; depois cada corpo é lido e emitido um por vez.
+    static func export(session: VaultSession, items: [VaultItem], blobs: BlobStore,
+                       passphrase: String, params: KDFParams, sink: (Data) throws -> Void) throws {
         guard !passphrase.isEmpty else { throw ArchiveError.emptyPassphrase }
         let mk = try session.masterKeyForArchive()
 
@@ -81,25 +121,32 @@ public enum VaultArchive {
         var labels = ["index"]
         labels.append(contentsOf: items.map { "content/\($0.id)" })
 
+        // Passe 1 — tamanhos, sem carregar conteúdo.
         var entries: [Entry] = []
-        var bodies: [Data] = []
+        var keys: [(String, String)] = []                  // (label, storageKey) só dos existentes
         var total = 0
         for label in labels {
-            guard let d = try blobs.get(try session.storageKey(label)) else { continue }
-            total += d.count
+            let key = try session.storageKey(label)
+            guard let n = try blobs.size(key) else { continue }
+            total += n
             guard total <= maxArchiveBytes else { throw ArchiveError.tooLarge }
-            entries.append(Entry(label: label, size: d.count))
-            bodies.append(d)
+            entries.append(Entry(label: label, size: n))
+            keys.append((label, key))
         }
 
         let sealedDir = try AEAD.seal(try JSONEncoder().encode(entries), key: mk, aad: header)
 
-        var out = Data(capacity: headerLen + wrappedMK.count + sealedDir.count + total + 8)
-        out.append(header)
-        appendU32(&out, UInt32(wrappedMK.count)); out.append(wrappedMK)
-        appendU32(&out, UInt32(sealedDir.count)); out.append(sealedDir)
-        for b in bodies { out.append(b) }
-        return out
+        var head = Data(capacity: headerLen + wrappedMK.count + sealedDir.count + 8)
+        head.append(header)
+        appendU32(&head, UInt32(wrappedMK.count)); head.append(wrappedMK)
+        appendU32(&head, UInt32(sealedDir.count)); head.append(sealedDir)
+        try sink(head)
+
+        // Passe 2 — corpos, um por vez. O tamanho tem de bater com o diretório já selado.
+        for (i, (_, key)) in keys.enumerated() {
+            guard let d = try blobs.get(key), d.count == entries[i].size else { throw ArchiveError.malformed }
+            try sink(d)
+        }
     }
 
     // MARK: - Importar

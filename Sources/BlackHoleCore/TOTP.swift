@@ -36,6 +36,43 @@ public enum TOTP {
         }
     }
 
+    // MARK: - Do lado de fora para dentro do cofre
+
+    /// Monta o URI `otpauth://` canônico da conta — é ASSIM que o 2FA é guardado no item (uma
+    /// string, retrocompatível, legível por qualquer autenticador). Espelha `parse(otpauthURI:)`:
+    /// o que sai daqui volta igual por lá.
+    public static func otpauthURI(for a: Account) -> String {
+        var comps = URLComponents()
+        comps.scheme = "otpauth"
+        comps.host = "totp"
+        let label = a.issuer.isEmpty ? a.label : "\(a.issuer):\(a.label)"
+        comps.path = "/" + (label.isEmpty ? "conta" : label)
+        var q = [URLQueryItem(name: "secret", value: base32Encode(a.secret))]
+        if !a.issuer.isEmpty { q.append(URLQueryItem(name: "issuer", value: a.issuer)) }
+        if a.digits != 6 { q.append(URLQueryItem(name: "digits", value: String(a.digits))) }
+        if a.period != 30 { q.append(URLQueryItem(name: "period", value: String(a.period))) }
+        if a.algorithm != .sha1 { q.append(URLQueryItem(name: "algorithm", value: a.algorithm.rawValue)) }
+        comps.queryItems = q
+        return comps.string ?? ""
+    }
+
+    /// Base32 (RFC 4648) SEM padding — o formato que todo autenticador aceita no campo `secret`.
+    public static func base32Encode(_ d: Data) -> String {
+        let alphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")
+        var out = ""
+        var buffer = 0, bits = 0
+        for byte in d {
+            buffer = (buffer << 8) | Int(byte)
+            bits += 8
+            while bits >= 5 {
+                out.append(alphabet[(buffer >> (bits - 5)) & 0x1F])
+                bits -= 5
+            }
+        }
+        if bits > 0 { out.append(alphabet[(buffer << (5 - bits)) & 0x1F]) }
+        return out
+    }
+
     // MARK: - Base32 (RFC 4648) — como os segredos chegam nos QRs
 
     /// Decodifica Base32 padrão (A–Z, 2–7). Tolerante ao que os apps reais emitem: minúsculas,

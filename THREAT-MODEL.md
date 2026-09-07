@@ -75,6 +75,21 @@ código, os formatos e os algoritmos. A única coisa secreta são as chaves.
 - **Chaves puladas do ratchet.** Mensagens fora de ordem mantêm chaves derivadas em estoque
   (máx. 100, FIFO, sob a MK) até chegarem — janela deliberada de usabilidade, com teto testado.
 
+## 4-bis. `PushRouting` — o identificador do push relay (opt-in, fora do cofre)
+
+Desde a v1.5.0 o núcleo também deriva `PushRouting` (mesma família do `RelayRendezvous`: segredo
+X25519 do par, sem handshake, cada lado calcula sozinho). Ele NÃO protege conteúdo — produz só um
+identificador opaco e uma prova para um serviço opt-in de push (o "push relay") acordar o app do
+destinatário com mais confiabilidade que o polling de hoje.
+
+**O que isto muda no modelo de ameaça, com quem liga o opt-in:** um serviço de terceiro (nosso,
+fora deste repositório — código em `push-relay/`, MIT) passa a saber que um identificador
+específico recebeu um "acorde" em tal horário, vindo de tal IP, e que N identificadores mapeiam
+para o mesmo aparelho. Ele NUNCA vê conteúdo, contatos ou os mailboxes Nostr — a garantia
+criptográfica é a mesma de sempre, o que muda é que existe agora um observador a mais, e só para
+quem liga a opção. Desenho completo e a decisão de produto em `docs/push-relay-design.md` no
+monorepo do app; o texto exato mostrado ao usuário fica em `RecoveryUI.swift` (`PushRelaySection`).
+
 ## 5. Invariantes (contratos congelados e testados)
 
 1. **Fail-closed:** qualquer falha (senha errada, adulteração, formato) → erro uniforme, nunca

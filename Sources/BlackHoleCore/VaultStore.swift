@@ -467,20 +467,34 @@ public final class VaultStore {
     private static let liveDefaultFileID = "__live_default_on__"
     private func liveDefaultKey() throws -> String { try session.storageKey("live-default") }
 
+    /// Chave do OPT-OUT: a partir da 1.7.0 o Ao vivo é LIGADO por padrão, então o que se persiste é
+    /// a recusa. Guardar a recusa (e não a adesão) é o que permite "ausência = ligado" sem inventar
+    /// um terceiro estado para "nunca escolheu".
+    private static let liveOffFileID = "__live_off__"
+    private func liveOffKey() throws -> String { try session.storageKey("live-off") }
+
     /// Liga/desliga a preferência de auto-ativar a sessão AO VIVO ao abrir uma conversa. Deniável
     /// (cifrada sob a MK, some no crypto-shred, não vaza no backup). É SÓ a preferência do usuário —
-    /// o transporte em si continua opt-in e mostra o teto honesto sempre que ativo.
+    /// o transporte em si continua mostrando o teto honesto sempre que ativo.
+    ///
+    /// Chave NOVA em vez de inverter a antiga: quem já tinha ligado no esquema anterior tinha um
+    /// blob em `live-default`; reinterpretá-lo como "desligado" viraria a escolha dessas pessoas de
+    /// cabeça para baixo numa atualização. Com a chave nova, todo mundo cai no padrão novo
+    /// (ligado) e só sai dele quem recusar explicitamente. A chave antiga é apagada ao escrever,
+    /// para não ficar dado morto sob a MK.
     public func setLiveDefault(_ on: Bool) throws {
+        try? blobs.delete(try liveDefaultKey())   // legado do esquema "presença = ligado"
         if on {
-            let (wf, ct) = try session.encryptFile(Data([1]), fileID: Self.liveDefaultFileID)
-            try blobs.put(try liveDefaultKey(), Self.packBlob(wf: wf, ct: ct))
+            try? blobs.delete(try liveOffKey())
         } else {
-            try? blobs.delete(try liveDefaultKey())
+            let (wf, ct) = try session.encryptFile(Data([1]), fileID: Self.liveOffFileID)
+            try blobs.put(try liveOffKey(), Self.packBlob(wf: wf, ct: ct))
         }
     }
 
+    /// LIGADO por padrão: só devolve `false` para quem recusou explicitamente.
     public func liveDefault() throws -> Bool {
-        ((try? blobs.get(try liveDefaultKey())) ?? nil) != nil
+        ((try? blobs.get(try liveOffKey())) ?? nil) == nil
     }
 
     // MARK: - Preferência "Por perto ligado" (sob a MK)

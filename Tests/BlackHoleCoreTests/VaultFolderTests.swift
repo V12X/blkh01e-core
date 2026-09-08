@@ -100,15 +100,17 @@ final class VaultFolderTests: XCTestCase {
         XCTAssertEqual(store2.items(in: .textsDocs, folder: "Trabalho").map(\.id), ["a"])
     }
 
-    func testLiveDefault_persistsUnderMK() throws {
+    func testLiveDefault_ligadoPorPadrao_ePersisteARecusa() throws {
         let (session, blobs, store) = try makeStore()
-        XCTAssertFalse(try store.liveDefault())            // off por padrão
-        try store.setLiveDefault(true)
-        XCTAssertTrue(try store.liveDefault())
+        XCTAssertTrue(try store.liveDefault())             // LIGADO por padrão (1.7.0)
+        try store.setLiveDefault(false)                    // o que se persiste é a RECUSA
+        XCTAssertFalse(try store.liveDefault())
         let store2 = try VaultStore(session: session, blobs: blobs)   // recarrega
-        XCTAssertTrue(try store2.liveDefault())
-        try store2.setLiveDefault(false)
         XCTAssertFalse(try store2.liveDefault())
+        try store2.setLiveDefault(true)
+        XCTAssertTrue(try store2.liveDefault())
+        let store3 = try VaultStore(session: session, blobs: blobs)
+        XCTAssertTrue(try store3.liveDefault())            // voltar ao padrão também persiste
     }
 
     func testNearbyDefault_persistsUnderMK_eIndependenteDoLive() throws {
@@ -116,16 +118,15 @@ final class VaultFolderTests: XCTestCase {
         XCTAssertFalse(try store.nearbyDefault())          // off por padrão
         try store.setNearbyDefault(true)
         XCTAssertTrue(try store.nearbyDefault())
-        // As duas preferências são INDEPENDENTES: ligar uma não pode ligar a outra (elas viraram
-        // ajustes globais de entrega, e confundir as chaves ativaria rádio sem o usuário pedir).
-        XCTAssertFalse(try store.liveDefault())
-        try store.setLiveDefault(true)
+        // As duas são INDEPENDENTES: mexer numa não pode mexer na outra (confundir as chaves
+        // ativaria rádio sem o usuário pedir). O Ao vivo vem ligado; desligá-lo não desliga o rádio.
+        try store.setLiveDefault(false)
         XCTAssertTrue(try store.nearbyDefault())
         let store2 = try VaultStore(session: session, blobs: blobs)   // recarrega
         XCTAssertTrue(try store2.nearbyDefault())
         try store2.setNearbyDefault(false)
         XCTAssertFalse(try store2.nearbyDefault())
-        XCTAssertTrue(try store2.liveDefault())            // desligar uma não desliga a outra
+        XCTAssertFalse(try store2.liveDefault())           // e desligar o rádio não religa o Ao vivo
     }
 
     func testBackCompat_oldItemDecodesWithNilFolder() throws {

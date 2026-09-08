@@ -111,6 +111,23 @@ final class VaultFolderTests: XCTestCase {
         XCTAssertFalse(try store2.liveDefault())
     }
 
+    func testNearbyDefault_persistsUnderMK_eIndependenteDoLive() throws {
+        let (session, blobs, store) = try makeStore()
+        XCTAssertFalse(try store.nearbyDefault())          // off por padrão
+        try store.setNearbyDefault(true)
+        XCTAssertTrue(try store.nearbyDefault())
+        // As duas preferências são INDEPENDENTES: ligar uma não pode ligar a outra (elas viraram
+        // ajustes globais de entrega, e confundir as chaves ativaria rádio sem o usuário pedir).
+        XCTAssertFalse(try store.liveDefault())
+        try store.setLiveDefault(true)
+        XCTAssertTrue(try store.nearbyDefault())
+        let store2 = try VaultStore(session: session, blobs: blobs)   // recarrega
+        XCTAssertTrue(try store2.nearbyDefault())
+        try store2.setNearbyDefault(false)
+        XCTAssertFalse(try store2.nearbyDefault())
+        XCTAssertTrue(try store2.liveDefault())            // desligar uma não desliga a outra
+    }
+
     func testBackCompat_oldItemDecodesWithNilFolder() throws {
         // Item sem o campo `folder` (índice antigo) → decodifica como raiz (folder nil).
         let old = #"[{"id":"x","drawer":"textsDocs","kind":"text","name":"n","size":1,"createdAt":1,"wrappedFileKey":""}]"#

@@ -483,6 +483,27 @@ public final class VaultStore {
         ((try? blobs.get(try liveDefaultKey())) ?? nil) != nil
     }
 
+    // MARK: - Preferência "Por perto ligado" (sob a MK)
+
+    private static let nearbyDefaultFileID = "__nearby_default_on__"
+    private func nearbyDefaultKey() throws -> String { try session.storageKey("nearby-default") }
+
+    /// Espelha `setLiveDefault` para o transporte de rádio local. Fica sob a MK pela MESMA razão:
+    /// uma preferência dessas no armazenamento comum sobreviveria ao crypto-shred e contaria que
+    /// o aparelho usa entrega por proximidade — exatamente o que o cofre existe para não contar.
+    public func setNearbyDefault(_ on: Bool) throws {
+        if on {
+            let (wf, ct) = try session.encryptFile(Data([1]), fileID: Self.nearbyDefaultFileID)
+            try blobs.put(try nearbyDefaultKey(), Self.packBlob(wf: wf, ct: ct))
+        } else {
+            try? blobs.delete(try nearbyDefaultKey())
+        }
+    }
+
+    public func nearbyDefault() throws -> Bool {
+        ((try? blobs.get(try nearbyDefaultKey())) ?? nil) != nil
+    }
+
     // MARK: - Conversas Double Ratchet (por contato), cifradas sob a MK
 
     private func conversationKey(_ contactID: String) throws -> String { try session.storageKey("msg-conv/\(contactID)") }

@@ -540,6 +540,38 @@ public final class VaultStore {
         try? blobs.delete(try conversationKey(contactID))
     }
 
+    // MARK: - Mídia das conversas: um blob POR MENSAGEM, sob a MK (1.8.0)
+
+    /// Antes, os bytes de cada foto/áudio viviam INLINE no JSON da conversa — o mesmo blob que
+    /// guarda o estado do ratchet e é regravado inteiro a cada mensagem. Com fotos acumuladas,
+    /// mandar um "ok" recifrava dezenas de MB, e descobrir a qual conversa um bloco recebido
+    /// pertence decifrava todas as fotos de todos os contatos. Aqui cada mídia é um blob próprio,
+    /// lido só quando a bolha aparece. Mesmas garantias do blob da conversa: sob a MK (some no
+    /// crypto-shred), fora do `.blkh01e` (o arquivo só leva o que o índice de itens alcança).
+    private func mediaKey(_ contactID: String, _ messageID: String) throws -> String {
+        try session.storageKey("msg-media/\(contactID)/\(messageID)")
+    }
+    private static func mediaFileID(_ contactID: String, _ messageID: String) -> String {
+        "__msg_media_\(contactID)_\(messageID)__"
+    }
+
+    public func setConversationMedia(_ bytes: Data, contactID: String, messageID: String) throws {
+        let (wf, ct) = try session.encryptFile(bytes, fileID: Self.mediaFileID(contactID, messageID))
+        try blobs.put(try mediaKey(contactID, messageID), Self.packBlob(wf: wf, ct: ct))
+    }
+
+    public func conversationMedia(contactID: String, messageID: String) throws -> Data? {
+        guard let blob = try blobs.get(try mediaKey(contactID, messageID)),
+              let (wf, ct) = Self.unpackBlob(blob) else { return nil }
+        return try session.decryptFile(wrappedFileKey: wf, ciphertext: ct,
+                                       fileID: Self.mediaFileID(contactID, messageID))
+    }
+
+    /// Idempotente: apagar o que não existe não é erro (a purga por prazo chama sem conferir).
+    public func deleteConversationMedia(contactID: String, messageID: String) {
+        try? blobs.delete((try? mediaKey(contactID, messageID)) ?? "")
+    }
+
     // MARK: - Texto extraído (Busca Privada), por item, sob a MK
 
     /// Rótulo LÓGICO do blob de texto extraído (OCR/PDF/texto puro) de um item. Público e

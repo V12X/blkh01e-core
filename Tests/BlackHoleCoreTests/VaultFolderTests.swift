@@ -129,6 +129,35 @@ final class VaultFolderTests: XCTestCase {
         XCTAssertFalse(try store2.liveDefault())           // e desligar o rádio não religa o Ao vivo
     }
 
+    func testConversationMedia_blobProprio_independenteDaConversa() throws {
+        let (session, blobs, store) = try makeStore()
+        let conv = Data("{\"ratchet\":\"x\"}".utf8)
+        let foto = Data(repeating: 0xAB, count: 50_000)
+        try store.setConversation(conv, for: "alice")
+        try store.setConversationMedia(foto, contactID: "alice", messageID: "m1")
+
+        // A mídia NÃO entra no blob da conversa: ele continua do tamanho do JSON, não da foto.
+        XCTAssertEqual(try store.conversation(for: "alice"), conv)
+        XCTAssertEqual(try store.conversationMedia(contactID: "alice", messageID: "m1"), foto)
+        XCTAssertNil(try store.conversationMedia(contactID: "alice", messageID: "m2"))
+        XCTAssertNil(try store.conversationMedia(contactID: "bob", messageID: "m1"))   // chave por contato
+
+        // Sobrevive a recarregar a sessão (é disco, não cache).
+        let store2 = try VaultStore(session: session, blobs: blobs)
+        XCTAssertEqual(try store2.conversationMedia(contactID: "alice", messageID: "m1"), foto)
+
+        // Apagar é idempotente e não toca a conversa.
+        store2.deleteConversationMedia(contactID: "alice", messageID: "m1")
+        store2.deleteConversationMedia(contactID: "alice", messageID: "m1")
+        XCTAssertNil(try store2.conversationMedia(contactID: "alice", messageID: "m1"))
+        XCTAssertEqual(try store2.conversation(for: "alice"), conv)
+
+        // E morre com o cofre: wipeAll é o crypto-shred.
+        try store2.setConversationMedia(foto, contactID: "alice", messageID: "m3")
+        try blobs.wipeAll()
+        XCTAssertNil(try store2.conversationMedia(contactID: "alice", messageID: "m3"))
+    }
+
     func testBackCompat_oldItemDecodesWithNilFolder() throws {
         // Item sem o campo `folder` (índice antigo) → decodifica como raiz (folder nil).
         let old = #"[{"id":"x","drawer":"textsDocs","kind":"text","name":"n","size":1,"createdAt":1,"wrappedFileKey":""}]"#
